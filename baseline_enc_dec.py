@@ -394,8 +394,8 @@ def train():
 
       # Pairwise accuracy (exact, MetricX/MTME-style) via mt_metrics_eval
       # Agreement returns (num_agree, num_pairs) and ignores label ties by design.
-      # If you need higher-is-better but your model outputs lower-is-better, negate preds here.
-      agree, num_pairs = mt_stats.Agreement(labels, preds)
+      # We need higher-is-better but your model outputs lower-is-better, negate preds here.
+      agree, num_pairs = mt_stats.Agreement(-labels, -preds)
       pairwise_acc = float(agree / num_pairs) if num_pairs > 0 else 0.0
 
       return {

@@ -1,5 +1,6 @@
 import os
 import argparse
+import json
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pandas as pd
 import torch
@@ -10,6 +11,7 @@ import dataclasses
 from typing import Optional, Tuple, Union
 from sklearn.model_selection import train_test_split
 from scipy.stats import pearsonr, kendalltau
+from mt_metrics_eval import stats as mt_stats
 from transformers import (
     AutoTokenizer,
     MT5PreTrainedModel,
@@ -44,7 +46,6 @@ class MT5ForRegressionOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     predictions: torch.FloatTensor = None
 
-
 class MT5EncoderForRegression(MT5PreTrainedModel):
     """MT5 Encoder-only model for regression."""
 
@@ -65,8 +66,12 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
         # 3. NO DECODER (We removed it to save memory and mimicking MetricX-25)
 
         # 4. Regression Head
-        # Takes the pooled encoder output and projects to scalar
-        self.lm_head=nn.Linear(config.d_model, 1)
+        # Projects pooled encoder output -> single scalar score
+        self.regression_head = nn.Linear(config.d_model, 1)
+
+        # Optional: start very small to avoid huge initial outputs
+        # nn.init.normal_(self.regression_head.weight, mean=0.0, std=1e-3)
+        # nn.init.zeros_(self.regression_head.bias)
         """
         self.lm_head = nn.Sequential(
             nn.Linear(config.d_model, 1),  # Project to scalar
@@ -125,8 +130,8 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
             pooled_output = torch.mean(hidden_states, dim=1)
 
         # 3. Predict Score
-        logits = self.lm_head(pooled_output)  # Shape: [Batch, 1]
-        predictions = logits.squeeze(-1)  # Shape: [Batch]
+        logits = self.regression_head(pooled_output)  # [Batch, 1]
+        predictions = logits.squeeze(-1)  # [Batch]
         #predictions = 25 * logits.squeeze(-1)
         # 4. Scale Sigmoid Output [0, 1] -> [0, 25]
         # This matches your previous logic for MQM scores
@@ -292,7 +297,22 @@ def train():
 
     print("Initializing Model...")
 
-    model = MT5EncoderForRegression.from_pretrained(MODEL_NAME,torch_dtype="auto")
+    model = MT5EncoderForRegression.from_pretrained(
+        MODEL_NAME,
+        torch_dtype="auto",
+        ignore_mismatched_sizes=True,
+    )
+
+    # --- Force encoder-only behavior (extra safety) ---
+    # If a decoder exists (e.g., if you swap to an encoder-decoder class later), drop it.
+    if hasattr(model, "decoder"):
+        model.decoder = None
+
+    # Make sure HF utilities/Trainer don't assume an encoder-decoder model.
+    model.config.is_encoder_decoder = False
+    model.config.is_decoder = False
+    model.config.use_cache = False
+    # -----------------------------------------------
 
     # Performance options (helpful on RTX 5090)
     model.gradient_checkpointing_enable()
@@ -315,20 +335,11 @@ def train():
       # Kendall Tau
       kendall = kendalltau(preds, labels).correlation if len(preds) > 1 else 0.0
 
-      # Pairwise accuracy (sampled for speed)
-      rng = np.random.default_rng(42)
-      n = len(preds)
-      num_pairs = n * (n - 1) // 2
-
-      correct = 0
-      for _ in range(num_pairs):
-          i, j = rng.integers(0, n, size=2)
-          if labels[i] == labels[j]:
-              continue
-          if (preds[i] - preds[j]) * (labels[i] - labels[j]) > 0:
-              correct += 1
-
-      pairwise_acc = correct / num_pairs if num_pairs > 0 else 0.0
+      # Pairwise accuracy (exact, MetricX/MTME-style) via mt_metrics_eval
+      # Agreement returns (num_agree, num_pairs) and ignores label ties by design.
+      # We need higher-is-better but your model outputs lower-is-better, negate preds here.
+      agree, num_pairs = mt_stats.Agreement(-labels, -preds)
+      pairwise_acc = float(agree / num_pairs) if num_pairs > 0 else 0.0
 
       return {
           "mse": mse,
@@ -338,52 +349,13 @@ def train():
           "pairwise_acc": pairwise_acc,
       }
 
-  #   training_args = TrainingArguments(
-  #     output_dir="./mt5-custom-metric-output",
-  #     learning_rate=2e-4,
-  #     save_safetensors=False,
-
-  #     warmup_steps=2000
-
-  #     per_device_train_batch_size=32,
-  #     gradient_accumulation_steps=1,
-  #     per_device_eval_batch_size=64,
-
-  #     # RTX 5090: prefer bf16 if available; fallback to fp16
-  #     bf16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8,
-  #     fp16=torch.cuda.is_available() and not (torch.cuda.get_device_capability(0)[0] >= 8),
-
-  #     num_train_epochs=None,
-  #     max_steps=20000,
-  #     weight_decay=0.0,
-
-  #     eval_strategy="steps",
-  #     eval_steps=500,
-
-  #     save_strategy="steps",
-  #     save_steps=1000,
-  #     save_total_limit=5,
-
-  #     logging_strategy="steps",
-  #     logging_steps=100,
-
-  #     load_best_model_at_end=True,
-  #     metric_for_best_model="mse",
-  #     greater_is_better=False,
-
-  #     remove_unused_columns=False,
-
-  #     dataloader_num_workers=8,
-  #     dataloader_pin_memory=True,
-  # )
-
     training_args = TrainingArguments(
       output_dir=args_cli.output_dir,
       learning_rate=1e-4,
       save_safetensors=False,
 
-      max_steps=2500,
-      warmup_steps=200,
+      max_steps=3200,
+      warmup_steps=250,
 
       per_device_train_batch_size=32,
       gradient_accumulation_steps=1,
@@ -400,7 +372,7 @@ def train():
 
       save_strategy="steps",
       save_steps=100,
-      save_total_limit=5,
+      save_total_limit=3,
 
       logging_strategy="steps",
       logging_steps=50,
@@ -410,11 +382,11 @@ def train():
       greater_is_better=False,
 
       remove_unused_columns=False,
-      dataloader_num_workers=4,
+      dataloader_num_workers=8,
       dataloader_pin_memory=True,
     )
 
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=5, early_stopping_threshold=1e-4)]
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=6, early_stopping_threshold=1e-4)]
 
     trainer = MetricXTrainer(
         model=model,
@@ -432,10 +404,22 @@ def train():
     # check_gradients(trainer, model)
     trainer.train()
 
+    # At this point, Trainer has loaded the best checkpoint into trainer.model
+    # (because load_best_model_at_end=True).
+    final_metrics = trainer.evaluate(eval_dataset=tokenized_val)
+
     os.makedirs(final_model_dir, exist_ok=True)
     trainer.save_model(final_model_dir)
     tokenizer.save_pretrained(final_model_dir)
+
+    # Save final evaluation metrics for the best model
+    metrics_path = os.path.join(final_model_dir, "final_eval_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(final_metrics, f, indent=2)
+
     print(f"Done. Final model saved to: {final_model_dir}")
+    print(f"Final eval metrics saved to: {metrics_path}")
+    print(final_metrics)
 
 
 if __name__ == "__main__":
