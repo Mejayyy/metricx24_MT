@@ -27,6 +27,52 @@ import numpy as np
 from transformers import Adafactor
 from transformers.optimization import get_inverse_sqrt_schedule
 
+
+# ============================================================================
+# Device Detection Utility
+# ============================================================================
+def get_device():
+    """
+    Detect and return the best available device for training.
+    Priority: MPS (Apple Silicon) > CUDA (NVIDIA) > CPU
+    
+    Returns:
+        Tuple of (device_string, device_object, device_name)
+    """
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        # macOS with Apple Silicon
+        device = torch.device("mps")
+        device_name = "Metal Performance Shaders (MPS) - Apple Silicon"
+        return "mps", device, device_name
+    elif torch.cuda.is_available():
+        # NVIDIA GPU
+        device = torch.device("cuda")
+        device_name = f"CUDA - NVIDIA GPU (Device 0: {torch.cuda.get_device_name(0)})"
+        return "cuda", device, device_name
+    else:
+        # CPU fallback
+        device = torch.device("cpu")
+        device_name = "CPU"
+        return "cpu", device, device_name
+
+
+def clear_device_cache(device_type):
+    """
+    Clear device-specific cache.
+    
+    Args:
+        device_type: String indicating device type ("mps", "cuda", or "cpu")
+    """
+    try:
+        if device_type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif device_type == "mps" and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        # CPU doesn't need cache clearing
+    except Exception as e:
+        print(f"Warning: Could not clear {device_type} cache: {e}")
+
+
 BaseModelOutput = transformers.modeling_outputs.BaseModelOutput
 ModelOutput = transformers.modeling_outputs.ModelOutput
 MT5Config = transformers.models.mt5.modeling_mt5.MT5Config
@@ -133,24 +179,16 @@ class MT5ForRegression(MT5PreTrainedModel):
 
     hidden_states = encoder_outputs[0]
 
-
-    if self.model_parallel:
-      torch.cuda.set_device(self.decoder.first_device)
-
     # Create 1 step of dummy input for the decoder.
-
     batch_size = input_ids.size(0)
-
-
-
     decoder_input_ids = torch.LongTensor([0]).repeat(batch_size).reshape(-1, 1)
 
+    # Move decoder_input_ids to the same device as the input
+    decoder_input_ids = decoder_input_ids.to(input_ids.device)
 
-    if torch.cuda.is_available():
-      decoder_input_ids = decoder_input_ids.to(torch.device("cuda"))
-
-
-    if self.model_parallel:
+    # Note: Model parallelism with MPS is not supported
+    # MPS only supports single-GPU execution
+    if self.model_parallel and input_ids.device.type == "cuda":
       torch.cuda.set_device(self.decoder.first_device)
       hidden_states = hidden_states.to(self.decoder.first_device)
       if decoder_input_ids is not None:
@@ -181,8 +219,8 @@ class MT5ForRegression(MT5PreTrainedModel):
 
     sequence_output = decoder_outputs[0]
 
-    # Set device for model parallelism
-    if self.model_parallel:
+    # Set device for model parallelism (CUDA only, MPS doesn't support multi-GPU)
+    if self.model_parallel and sequence_output.device.type == "cuda":
       torch.cuda.set_device(self.encoder.first_device)
       self.lm_head = self.lm_head.to(self.encoder.first_device)
       sequence_output = sequence_output.to(self.lm_head.weight.device)
@@ -293,8 +331,40 @@ def train():
     # Back to standard 512
     MAX_LENGTH = 512
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # Detect and log device
+    device_type, device, device_name = get_device()
+    
+    # Comprehensive device logging
+    print(f"\n{'='*80}")
+    print(f"PyTorch Training Configuration")
+    print(f"{'='*80}")
+    print(f"Device Type: {device_type.upper()}")
+    print(f"Device: {device_name}")
+    print(f"PyTorch Version: {torch.__version__}")
+    print(f"Model: {MODEL_NAME}")
+    print(f"Max Sequence Length: {MAX_LENGTH}")
+    
+    # Device-specific information
+    if device_type == "mps":
+        print(f"\nMPS Configuration:")
+        print(f"  - Metal Performance Shaders Available: {torch.backends.mps.is_available()}")
+        print(f"  - MPS Built: {torch.backends.mps.is_built()}")
+        print(f"  - Note: Batch sizes and num_workers adjusted for MPS optimization")
+    elif device_type == "cuda":
+        print(f"\nCUDA Configuration:")
+        print(f"  - CUDA Available: {torch.cuda.is_available()}")
+        print(f"  - GPU Count: {torch.cuda.device_count()}")
+        print(f"  - Compute Capability: {torch.cuda.get_device_capability(0)}")
+        print(f"  - Total GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    else:
+        print(f"\nCPU Configuration:")
+        print(f"  - Running on CPU (this will be slow for training)")
+        print(f"  - Consider using a GPU for better performance")
+    
+    print(f"{'='*80}\n")
+
+    # Clear device cache
+    clear_device_cache(device_type)
 
     df = load_preformatted_data(JSONL_FILE)
     train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
@@ -343,12 +413,19 @@ def train():
 
     print("Initializing Model...")
 
-    model = MT5ForRegression.from_pretrained(MODEL_NAME,torch_dtype="auto")
+    model = MT5ForRegression.from_pretrained(MODEL_NAME, torch_dtype="auto")
+    model = model.to(device)
 
-    # Performance options (helpful on RTX 5090)
+    # Performance options - device-specific
     model.gradient_checkpointing_enable()
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    
+    # TF32 optimizations are CUDA-only; skip for MPS/CPU
+    if device_type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("Enabled CUDA TF32 optimizations")
+    elif device_type == "mps":
+        print("Using MPS (Apple Silicon) - TF32 optimizations not available")
 
 
     def compute_metrics(eval_pred):
@@ -398,6 +475,27 @@ def train():
   #     dataloader_pin_memory=True,
   # )
 
+    # Determine mixed precision settings based on device
+    if device_type == "mps":
+        # MPS prefers bf16 and doesn't support pin_memory
+        use_bf16 = True
+        use_fp16 = False
+        use_pin_memory = False
+        num_workers = 0  # MPS works better with 0 workers
+    elif device_type == "cuda":
+        # CUDA: bf16 for compute capability >= 8, fp16 otherwise
+        compute_capability = torch.cuda.get_device_capability(0)[0]
+        use_bf16 = compute_capability >= 8
+        use_fp16 = not use_bf16
+        use_pin_memory = True
+        num_workers = 4
+    else:
+        # CPU: no mixed precision
+        use_bf16 = False
+        use_fp16 = False
+        use_pin_memory = False
+        num_workers = 0
+
     training_args = TrainingArguments(
       output_dir="./mt5-custom-metric-output",
       learning_rate=1e-4,
@@ -410,8 +508,8 @@ def train():
       gradient_accumulation_steps=1,
       per_device_eval_batch_size=64,
 
-      bf16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8,
-      fp16=torch.cuda.is_available() and not (torch.cuda.get_device_capability(0)[0] >= 8),
+      bf16=use_bf16,
+      fp16=use_fp16,
 
       weight_decay=0.0,
       max_grad_norm=1.0,
@@ -431,8 +529,8 @@ def train():
       greater_is_better=False,
 
       remove_unused_columns=False,
-      dataloader_num_workers=4,
-      dataloader_pin_memory=True,
+      dataloader_num_workers=num_workers,
+      dataloader_pin_memory=use_pin_memory,
     )
 
     callbacks=[EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=1e-4)]

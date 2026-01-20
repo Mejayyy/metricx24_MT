@@ -1,0 +1,40 @@
+# Machine Translation Quality Estimation - MPS Optimized
+# Requirements for Attempt_5_good.py with Apple Silicon MPS support
+# Last updated: 2026-01-20
+
+# Core PyTorch (with MPS support for Apple Silicon)
+# NOTE: PyTorch 2.0+ has MPS support built-in
+torch>=2.0.0
+
+# Transformers for MT5 models
+transformers>=4.36.0
+
+# HuggingFace Datasets for data handling
+datasets>=2.14.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Data processing
+pandas>=2.0.0
+
+# Machine learning utilities
+scikit-learn>=1.3.0
+
+# MT5 tokenizer support
+sentencepiece>=0.1.99
+
+# Protobuf (required for T5 fast tokenizer)
+protobuf>=3.20.0
+
+# Optional: Accelerate for distributed training (works with MPS)
+accelerate>=0.26.0
+
+# Optional: For logging and monitoring
+# tensorboard>=2.14.0
+# wandb>=0.15.0
+
+# Development/Testing dependencies (optional)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
