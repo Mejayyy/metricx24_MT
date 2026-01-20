@@ -70,8 +70,8 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
         self.regression_head = nn.Linear(config.d_model, 1)
 
         # Optional: start very small to avoid huge initial outputs
-        # nn.init.normal_(self.regression_head.weight, mean=0.0, std=1e-3)
-        # nn.init.zeros_(self.regression_head.bias)
+        nn.init.normal_(self.regression_head.weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.regression_head.bias)
         """
         self.lm_head = nn.Sequential(
             nn.Linear(config.d_model, 1),  # Project to scalar
@@ -129,13 +129,23 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
             # Fallback if no mask (rare)
             pooled_output = torch.mean(hidden_states, dim=1)
 
-        # Safety: avoid propagating NaNs/Infs from mixed precision / bad batches
-        pooled_output = torch.nan_to_num(pooled_output, nan=0.0, posinf=1e4, neginf=-1e4)
+        # Fail fast: we should not produce NaNs/Infs
+        if not torch.isfinite(pooled_output).all():
+            bad = pooled_output[~torch.isfinite(pooled_output)]
+            raise RuntimeError(
+                f"Non-finite pooled_output detected (count={bad.numel()}). "
+                f"pooled_output stats: min={pooled_output.min().item()}, max={pooled_output.max().item()}"
+            )
 
         # 3. Predict Score
         logits = self.regression_head(pooled_output)  # [Batch, 1]
         predictions = logits.squeeze(-1)  # [Batch]
-        predictions = torch.nan_to_num(predictions, nan=0.0, posinf=1e4, neginf=-1e4)
+        if not torch.isfinite(predictions).all():
+            bad = predictions[~torch.isfinite(predictions)]
+            raise RuntimeError(
+                f"Non-finite predictions detected (count={bad.numel()}). "
+                f"pred stats: min={predictions.min().item()}, max={predictions.max().item()}"
+            )
         #predictions = 25 * logits.squeeze(-1)
         # 4. Scale Sigmoid Output [0, 1] -> [0, 25]
         # This matches your previous logic for MQM scores
@@ -211,6 +221,8 @@ class MetricXTrainer(Trainer):
                 scale_parameter=False,
                 relative_step=False,
                 warmup_init=False,
+                clip_threshold=1.0, # makes Adafactor dampen updates when the RMS of the update would be too large. It’s not the same as max_grad_norm — it’s built into Adafactor’s update calculation
+                eps=(1e-30, 1e-3), # prevents divide-by-zero / very tiny denominators inside Adafactor’s factored second-moment math (numerical stability)
             )
         return self.optimizer
 
@@ -387,7 +399,7 @@ def train():
       per_device_eval_batch_size=64,
 
       bf16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8,
-      fp16=torch.cuda.is_available() and not (torch.cuda.get_device_capability(0)[0] >= 8),
+      fp16=False,
 
       weight_decay=0.0,
       max_grad_norm=1.0,
