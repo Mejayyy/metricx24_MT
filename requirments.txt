@@ -1,0 +1,23 @@
+# Python version
+# Requires Python == 3.10.*
+
+# Core ML
+torch>=2.1.0,<2.3.0
+transformers>=4.36.0,<4.42.0
+datasets>=2.16.0,<2.20.0
+accelerate>=0.25.0,<0.31.0
+
+# Tokenization
+sentencepiece>=0.1.99
+tokenizers>=0.15.0,<0.20.0
+
+# Data & math
+numpy>=1.23,<2.0
+pandas>=1.5,<2.3
+scipy>=1.9,<1.12
+scikit-learn>=1.2,<1.5
+
+# Utilities
+tqdm>=4.64
+protobuf>=3.20,<5
+packaging

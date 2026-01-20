@@ -1,8 +1,6 @@
+from operator import call, truediv
 import os
-
-
 import pandas as pd
-
 import torch
 from torch import nn
 import copy
@@ -16,12 +14,18 @@ from transformers import (
     MT5PreTrainedModel,
     MT5Config,
     Trainer,
-    TrainingArguments
+    TrainingArguments,
+    EarlyStoppingCallback
 )
 from transformers.models.mt5.modeling_mt5 import MT5Stack
 import transformers.modeling_outputs
 from datasets import Dataset
 import transformers
+import warnings
+import numpy as np
+
+from transformers import Adafactor
+from transformers.optimization import get_inverse_sqrt_schedule
 
 BaseModelOutput = transformers.modeling_outputs.BaseModelOutput
 ModelOutput = transformers.modeling_outputs.ModelOutput
@@ -30,17 +34,14 @@ MT5PreTrainedModel = transformers.models.mt5.modeling_mt5.MT5PreTrainedModel
 MT5Stack = transformers.models.mt5.modeling_mt5.MT5Stack
 
 __HEAD_MASK_WARNING_MSG = (
-    #transformers.models.mt5.modeling_mt5.__HEAD_MASK_WARNING_MSG  # pylint: disable=protected-access
-    "Warning HEAD_MASK_WARNING_MSG"
+    transformers.models.mt5.modeling_mt5.__HEAD_MASK_WARNING_MSG  # pylint: disable=protected-access
+    # "Warning HEAD_MASK_WARNING_MSG"
 )
 
 @dataclasses.dataclass
 class MT5ForRegressionOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     predictions: torch.FloatTensor = None
-
-
-from transformers import MT5Model
 
 
 class MT5ForRegression(MT5PreTrainedModel):
@@ -104,8 +105,8 @@ class MT5ForRegression(MT5PreTrainedModel):
     # decoder_head_mask
     if head_mask is not None and decoder_head_mask is None:
       if self.config.num_layers == self.config.num_decoder_layers:
-        print("\nHEAD_MASK_MSG WARNING \n")
-        #warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
+        # print("\nHEAD_MASK_MSG WARNING \n")
+        warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
         decoder_head_mask = head_mask
 
     # Encode if needed (training, first prediction pass)
@@ -260,13 +261,37 @@ def check_gradients(trainer, model):
     print("--------------------------------")
 
 
+class MetricXTrainer(Trainer):
+    def create_optimizer(self):
+        if self.optimizer is None:
+            # MetricX-style Adafactor: external LR, no relative_step
+            self.optimizer = Adafactor(
+                self.model.parameters(),
+                lr=self.args.learning_rate,
+                scale_parameter=False,
+                relative_step=False,
+                warmup_init=False,
+            )
+        return self.optimizer
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        if self.lr_scheduler is None:
+            opt = optimizer if optimizer is not None else self.optimizer
+            # inverse sqrt schedule with linear warmup
+            self.lr_scheduler = get_inverse_sqrt_schedule(
+                opt,
+                num_warmup_steps=self.args.warmup_steps,
+                # optional: timescale defaults in HF; you can pass it if you want
+                # timescale=10000,
+            )
+        return self.lr_scheduler
 
 def train():
-    MODEL_NAME = "google/mt5-base"
-    JSONL_FILE = "wmt21_mqm_ende.jsonl"
+    MODEL_NAME = "google/mt5-small"
+    JSONL_FILE = "all_data.jsonl"
 
     # Back to standard 512
-    MAX_LENGTH = 256
+    MAX_LENGTH = 512
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -275,8 +300,8 @@ def train():
     train_df, val_df = train_test_split(df, test_size=0.1, random_state=42)
     #DEBUGGING----------------
     # Then cap sizes for debugging
-    train_df = train_df.iloc[:500].reset_index(drop=True)
-    val_df = val_df.iloc[:100].reset_index(drop=True)
+    # train_df = train_df.iloc[:500].reset_index(drop=True)
+    # val_df = val_df.iloc[:100].reset_index(drop=True)
     #-------------------------
 
 
@@ -318,11 +343,12 @@ def train():
 
     print("Initializing Model...")
 
-    model = MT5ForRegression.from_pretrained(MODEL_NAME,
-                                             #use_safetensors=True,
-                                             torch_dtype="auto"
-                                               )
+    model = MT5ForRegression.from_pretrained(MODEL_NAME,torch_dtype="auto")
 
+    # Performance options (helpful on RTX 5090)
+    model.gradient_checkpointing_enable()
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
     def compute_metrics(eval_pred):
@@ -330,51 +356,101 @@ def train():
         predictions = predictions.flatten()
         labels = labels.flatten()
         mse = ((predictions - labels) ** 2).mean()
-        #pearson_corr, _ = pearsonr(predictions, labels)
-        pearson_corr=0.5
-        #kendall_corr, _ = kendalltau(predictions, labels)
-        kendall_corr=0.5
-        return {"mse": mse,
-                "pearson": pearson_corr,
-                "kendall": kendall_corr}
+        rmse = np.sqrt(mse)
+        return {"mse": mse, "rmse": rmse}
 
-    # --- 6GB GPU SETTINGS ---
+  #   training_args = TrainingArguments(
+  #     output_dir="./mt5-custom-metric-output",
+  #     learning_rate=2e-4,
+  #     save_safetensors=False,
+
+  #     warmup_steps=2000
+
+  #     per_device_train_batch_size=32,
+  #     gradient_accumulation_steps=1,
+  #     per_device_eval_batch_size=64,
+
+  #     # RTX 5090: prefer bf16 if available; fallback to fp16
+  #     bf16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8,
+  #     fp16=torch.cuda.is_available() and not (torch.cuda.get_device_capability(0)[0] >= 8),
+
+  #     num_train_epochs=None,
+  #     max_steps=20000,
+  #     weight_decay=0.0,
+
+  #     eval_strategy="steps",
+  #     eval_steps=500,
+
+  #     save_strategy="steps",
+  #     save_steps=1000,
+  #     save_total_limit=5,
+
+  #     logging_strategy="steps",
+  #     logging_steps=100,
+
+  #     load_best_model_at_end=True,
+  #     metric_for_best_model="mse",
+  #     greater_is_better=False,
+
+  #     remove_unused_columns=False,
+
+  #     dataloader_num_workers=8,
+  #     dataloader_pin_memory=True,
+  # )
+
     training_args = TrainingArguments(
-        output_dir="./mt5-custom-metric-output",
-        learning_rate=1e-5,
-        save_safetensors=False,
+      output_dir="./mt5-custom-metric-output",
+      learning_rate=1e-4,
+      save_safetensors=False,
 
+      max_steps=2500,
+      warmup_steps=200,
 
-        #per_device_train_batch_size=8,
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=1,
-        per_device_eval_batch_size=8,
-        fp16=False,
-        num_train_epochs=6,
-        weight_decay=1e-6,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="mse",
-        greater_is_better=False,
-        remove_unused_columns=False,
-        dataloader_num_workers=0,
-        dataloader_pin_memory=False
+      per_device_train_batch_size=32,
+      gradient_accumulation_steps=1,
+      per_device_eval_batch_size=64,
+
+      bf16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8,
+      fp16=torch.cuda.is_available() and not (torch.cuda.get_device_capability(0)[0] >= 8),
+
+      weight_decay=0.0,
+      max_grad_norm=1.0,
+
+      eval_strategy="steps",
+      eval_steps=100,
+
+      save_strategy="steps",
+      save_steps=100,
+      save_total_limit=5,
+
+      logging_strategy="steps",
+      logging_steps=50,
+
+      load_best_model_at_end=True,
+      metric_for_best_model="mse",
+      greater_is_better=False,
+
+      remove_unused_columns=False,
+      dataloader_num_workers=4,
+      dataloader_pin_memory=True,
     )
 
-    trainer = Trainer(
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=1e-4)]
+
+    trainer = MetricXTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
         eval_dataset=tokenized_val,
         tokenizer=tokenizer,
         compute_metrics=compute_metrics,
+        callbacks=callbacks
     )
 
     print("Starting Training...")
 
     # Add this right before trainer.train()
-    check_gradients(trainer, model)
+    # check_gradients(trainer, model)
     trainer.train()
 
     trainer.save_model("./mt5-custom-metric-final")
