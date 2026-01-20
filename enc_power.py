@@ -129,9 +129,13 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
             # Fallback if no mask (rare)
             pooled_output = torch.mean(hidden_states, dim=1)
 
+        # Safety: avoid propagating NaNs/Infs from mixed precision / bad batches
+        pooled_output = torch.nan_to_num(pooled_output, nan=0.0, posinf=1e4, neginf=-1e4)
+
         # 3. Predict Score
         logits = self.regression_head(pooled_output)  # [Batch, 1]
         predictions = logits.squeeze(-1)  # [Batch]
+        predictions = torch.nan_to_num(predictions, nan=0.0, posinf=1e4, neginf=-1e4)
         #predictions = 25 * logits.squeeze(-1)
         # 4. Scale Sigmoid Output [0, 1] -> [0, 25]
         # This matches your previous logic for MQM scores
@@ -140,9 +144,14 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
         loss = None
         if labels is not None:
             loss_fct = nn.MSELoss()
-            # Move labels to correct device
+            # Move labels to correct device and compute loss in fp32 for stability
             labels = labels.to(predictions.device)
-            loss = loss_fct(predictions, labels.view(-1))
+            pred_fp32 = predictions.float()
+            lab_fp32 = labels.view(-1).float()
+            # Safety: strip NaNs/Infs if they appear
+            pred_fp32 = torch.nan_to_num(pred_fp32, nan=0.0, posinf=1e4, neginf=-1e4)
+            lab_fp32 = torch.nan_to_num(lab_fp32, nan=0.0, posinf=1e4, neginf=-1e4)
+            loss = loss_fct(pred_fp32, lab_fp32)
 
         return MT5ForRegressionOutput(
             loss=loss,
@@ -322,23 +331,38 @@ def train():
 
     def compute_metrics(eval_pred):
       predictions, labels = eval_pred
-      preds = predictions.flatten()
-      labels = labels.flatten()
+      preds = np.asarray(predictions).reshape(-1)
+      labs = np.asarray(labels).reshape(-1)
+
+      # Filter out NaNs/Infs to avoid scipy/numpy crashes
+      finite = np.isfinite(preds) & np.isfinite(labs)
+      preds = preds[finite]
+      labs = labs[finite]
+
+      if preds.size == 0 or labs.size == 0:
+        return {
+            "mse": float("nan"),
+            "rmse": float("nan"),
+            "pearson": 0.0,
+            "kendall_tau": 0.0,
+            "pairwise_acc": 0.0,
+            "num_finite": 0,
+        }
 
       # MSE / RMSE
-      mse = float(((preds - labels) ** 2).mean())
+      mse = float(np.mean((preds - labs) ** 2))
       rmse = float(np.sqrt(mse))
 
-      # Pearson
-      pearson = pearsonr(preds, labels)[0] if len(preds) > 1 else 0.0
+      # Pearson / Kendall (need at least 2 points)
+      if preds.size > 1:
+        pearson = float(pearsonr(preds, labs)[0])
+        kendall = float(kendalltau(preds, labs).correlation)
+      else:
+        pearson = 0.0
+        kendall = 0.0
 
-      # Kendall Tau
-      kendall = kendalltau(preds, labels).correlation if len(preds) > 1 else 0.0
-
-      # Pairwise accuracy (exact, MetricX/MTME-style) via mt_metrics_eval
-      # Agreement returns (num_agree, num_pairs) and ignores label ties by design.
-      # We need higher-is-better but your model outputs lower-is-better, negate preds here.
-      agree, num_pairs = mt_stats.Agreement(-labels, -preds)
+      # Pairwise accuracy (MetricX/MTME-style). Negate so higher-is-better.
+      agree, num_pairs = mt_stats.Agreement(-labs, -preds)
       pairwise_acc = float(agree / num_pairs) if num_pairs > 0 else 0.0
 
       return {
@@ -347,6 +371,7 @@ def train():
           "pearson": pearson,
           "kendall_tau": kendall,
           "pairwise_acc": pairwise_acc,
+          "num_finite": int(preds.size),
       }
 
     training_args = TrainingArguments(
