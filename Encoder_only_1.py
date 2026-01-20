@@ -52,15 +52,13 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
 
         # 4. Regression Head
         # Takes the pooled encoder output and projects to scalar
-        self.lm_head=nn.Linear(config.d_model, 1)
-        """
+        #self.lm_head=nn.Linear(config.d_model, 1)
+
         self.lm_head = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),  # Optional: Dense layer for feature extraction
-            nn.Tanh(),  # Non-linearity
             nn.Linear(config.d_model, 1),  # Project to scalar
             nn.Sigmoid()  # Squash to [0, 1]
         )
-        """
+
 
         # Initialize weights
         self.post_init()
@@ -115,8 +113,8 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
 
         # 3. Predict Score
         logits = self.lm_head(pooled_output)  # Shape: [Batch, 1]
-        predictions = logits.squeeze(-1)  # Shape: [Batch]
-
+        #predictions = logits.squeeze(-1)  # Shape: [Batch]
+        predictions = 25 * logits.squeeze(-1)
         # 4. Scale Sigmoid Output [0, 1] -> [0, 25]
         # This matches your previous logic for MQM scores
         #predictions = predictions * 25.0
@@ -269,4 +267,4 @@ def train():
 
 if __name__ == "__main__":
     print()
-    # train()
+    train()
