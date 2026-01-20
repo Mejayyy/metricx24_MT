@@ -1,5 +1,5 @@
-from operator import call, truediv
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pandas as pd
 import torch
 from torch import nn
@@ -287,7 +287,7 @@ class MetricXTrainer(Trainer):
         return self.lr_scheduler
 
 def train():
-    MODEL_NAME = "google/mt5-small"
+    MODEL_NAME = "google/mt5-base"
     JSONL_FILE = "all_data.jsonl"
 
     # Back to standard 512
@@ -352,12 +352,42 @@ def train():
 
 
     def compute_metrics(eval_pred):
-        predictions, labels = eval_pred
-        predictions = predictions.flatten()
-        labels = labels.flatten()
-        mse = ((predictions - labels) ** 2).mean()
-        rmse = np.sqrt(mse)
-        return {"mse": mse, "rmse": rmse}
+      predictions, labels = eval_pred
+      preds = predictions.flatten()
+      labels = labels.flatten()
+
+      # MSE / RMSE
+      mse = float(((preds - labels) ** 2).mean())
+      rmse = float(np.sqrt(mse))
+
+      # Pearson
+      pearson = pearsonr(preds, labels)[0] if len(preds) > 1 else 0.0
+
+      # Kendall Tau
+      kendall = kendalltau(preds, labels).correlation if len(preds) > 1 else 0.0
+
+      # Pairwise accuracy (sampled for speed)
+      rng = np.random.default_rng(42)
+      n = len(preds)
+      num_pairs = n * (n - 1) // 2
+
+      correct = 0
+      for _ in range(num_pairs):
+          i, j = rng.integers(0, n, size=2)
+          if labels[i] == labels[j]:
+              continue
+          if (preds[i] - preds[j]) * (labels[i] - labels[j]) > 0:
+              correct += 1
+
+      pairwise_acc = correct / num_pairs if num_pairs > 0 else 0.0
+
+      return {
+          "mse": mse,
+          "rmse": rmse,
+          "pearson": pearson,
+          "kendall_tau": kendall,
+          "pairwise_acc": pairwise_acc,
+      }
 
   #   training_args = TrainingArguments(
   #     output_dir="./mt5-custom-metric-output",
@@ -399,7 +429,7 @@ def train():
   # )
 
     training_args = TrainingArguments(
-      output_dir="./mt5-custom-metric-output",
+      output_dir="./mt5-custom-metric-base-output",
       learning_rate=1e-4,
       save_safetensors=False,
 
@@ -435,7 +465,7 @@ def train():
       dataloader_pin_memory=True,
     )
 
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=1e-4)]
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=5, early_stopping_threshold=1e-4)]
 
     trainer = MetricXTrainer(
         model=model,
