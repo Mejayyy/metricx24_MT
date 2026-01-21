@@ -65,34 +65,25 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
 
         # 3. NO DECODER (We removed it to save memory and mimicking MetricX-25)
 
-        # 4. Attention Pooling (learned pooling over tokens)
-        # Produces a single [Batch, Dim] vector by attending over encoder token states.
-        self.attn_pool = nn.Linear(config.d_model, 1, bias=False)
-
-        # 5. Regression Head (2-layer MLP)
-        # pooled_output [B, D] -> scalar in [0, 1] via sigmoid, then scaled to [0, 25] later.
-        hidden_dim = max(128, config.d_model // 2)
+        # 4. Regression Head (MLP + LayerNorm)
+        # Produces an unbounded logit; sigmoid + scaling applied in forward in fp32.
+        hidden = max(1, config.d_model // 2)
         self.lm_head = nn.Sequential(
-            nn.Linear(config.d_model, hidden_dim),
+            nn.LayerNorm(config.d_model),
+            nn.Linear(config.d_model, hidden),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
+            nn.Linear(hidden, 1),
         )
 
-        # Initialize weights (HF default init)
+        # initialize the Linear layers
+        for m in self.lm_head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=1e-3)
+                nn.init.zeros_(m.bias)
+
+        # Initialize weights
         self.post_init()
-
-        # Init: keep outputs small at start for stability (override HF init for new layers)
-        nn.init.normal_(self.attn_pool.weight, mean=0.0, std=1e-3)
-        nn.init.normal_(self.lm_head[0].weight, mean=0.0, std=1e-3)
-        nn.init.zeros_(self.lm_head[0].bias)
-        nn.init.normal_(self.lm_head[3].weight, mean=0.0, std=1e-3)
-        nn.init.zeros_(self.lm_head[3].bias)
-
-        # Keep new layers in fp32 for numerical stability (encoder can stay bf16)
-        self.attn_pool = self.attn_pool.float()
-        self.lm_head = self.lm_head.float()
 
     def forward(
             self,
@@ -123,24 +114,24 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
         # hidden_states shape: [Batch, Seq_Len, Dim]
         hidden_states = encoder_outputs[0]
 
-        # 2. Attention Pooling (learned)
-        # Compute token scores -> masked softmax -> weighted sum.
-        # hidden_states: [B, S, D]
-        scores = self.attn_pool(hidden_states).squeeze(-1)  # [B, S]
-
+        # 2. Mean Pooling
+        # We must mask out padding tokens so they don't drag down the average.
         if attention_mask is not None:
-            # Use a large negative number instead of -inf for numerical stability in softmax.
-            scores = scores.masked_fill(attention_mask == 0, -1e9)
+            # Expand mask: [Batch, Seq] -> [Batch, Seq, Dim]
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
 
-            # If a row is entirely padding (sum==0), avoid softmax over all -1e9 (can produce NaNs)
-            # by setting scores to 0 so softmax becomes uniform.
-            all_pad = attention_mask.sum(dim=-1) == 0  # [B]
-            if all_pad.any():
-                scores = scores.clone()
-                scores[all_pad] = 0.0
+            # Sum embeddings of non-padding tokens
+            sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
 
-        weights = torch.softmax(scores, dim=-1)  # [B, S]
-        pooled_output = torch.sum(hidden_states * weights.unsqueeze(-1), dim=1)  # [B, D]
+            # Count non-padding tokens
+            sum_mask = input_mask_expanded.sum(1)
+            sum_mask = torch.clamp(sum_mask, min=1e-9)  # Avoid div by zero
+
+            # Average
+            pooled_output = sum_embeddings / sum_mask  # Shape: [Batch, Dim]
+        else:
+            # Fallback if no mask (rare)
+            pooled_output = torch.mean(hidden_states, dim=1)
 
         # Fail fast: we should not produce NaNs/Infs
         if not torch.isfinite(pooled_output).all():
@@ -150,10 +141,11 @@ class MT5EncoderForRegression(MT5PreTrainedModel):
                 f"pooled_output stats: min={pooled_output.min().item()}, max={pooled_output.max().item()}"
             )
 
-        # 3. Predict Score (compute head in fp32 for stability)
-        with torch.amp.autocast(device_type="cuda", enabled=False):
-            logits = self.lm_head(pooled_output.float())  # [Batch, 1]
-        predictions = 25 * logits.squeeze(-1)  # [Batch]
+        # 3. Predict Score
+        # Apply sigmoid + scaling in fp32 for stability.
+        logits = self.lm_head(pooled_output).squeeze(-1)  # [Batch]
+        preds_fp32 = torch.sigmoid(logits.float()) * 25.0
+        predictions = preds_fp32.to(logits.dtype)
         if not torch.isfinite(predictions).all():
             bad = predictions[~torch.isfinite(predictions)]
             raise RuntimeError(
@@ -402,7 +394,7 @@ def train():
 
     training_args = TrainingArguments(
       output_dir=args_cli.output_dir,
-      learning_rate=2e-5,
+      learning_rate=1e-4,
       save_safetensors=False,
 
       max_steps=3200,

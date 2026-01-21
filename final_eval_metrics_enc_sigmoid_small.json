@@ -1,0 +1,14 @@
+{
+  "eval_loss": 13.341093063354492,
+  "eval_mse": 13.341092109680176,
+  "eval_rmse": 3.6525459763951194,
+  "eval_pearson": 0.7243302318687844,
+  "eval_kendall_tau": 0.7061094700707187,
+  "eval_pairwise_acc": 0.7315216490366615,
+  "eval_num_finite": 1871,
+  "eval_runtime": 4.3196,
+  "eval_samples_per_second": 433.145,
+  "eval_steps_per_second": 6.945,
+  "epoch": 4.174573055028463,
+  "train_time": 413.7553
+}
