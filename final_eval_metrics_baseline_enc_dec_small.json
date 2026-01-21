@@ -9,5 +9,6 @@
   "eval_samples_per_second": 414.96,
   "eval_steps_per_second": 6.654,
   "epoch": 6.072106261859583,
-  "train_time": 846.6122
+  "train_time": 846.6122,
+  "trainable_params": 300176768
 }

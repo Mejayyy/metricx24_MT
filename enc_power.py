@@ -340,6 +340,13 @@ def train():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"Total params: {total:,}")
+    print(f"Trainable params: {trainable:,}")
+    print(f"Frozen params: {total - trainable:,}")
+
 
     def compute_metrics(eval_pred):
       predictions, labels = eval_pred
