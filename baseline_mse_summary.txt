@@ -1,24 +1,24 @@
 Random Baseline MSE Analysis
 ================================================================================
 Dataset: all_data.jsonl
-Total Entries: 8959
-Date: 2026-01-20 19:51:14
+Total Entries: 18709
+Date: 2026-01-21 19:14:03
 
 Baseline MSE Statistics (100 iterations):
 --------------------------------------------------------------------------------
-Mean MSE:           186.645834
-Std Deviation:      1.815019
-Min MSE:            182.042044
-Max MSE:            191.268185
-Median MSE:         186.589415
-25th Percentile:    185.287272
-75th Percentile:    187.822499
+Mean MSE:           165.528060
+Std Deviation:      1.068494
+Min MSE:            163.094580
+Max MSE:            167.860180
+Median MSE:         165.535683
+25th Percentile:    164.763007
+75th Percentile:    166.417059
 
 Dataset Score Statistics:
 --------------------------------------------------------------------------------
 Score Range:        [0.00, 25.00]
-Mean Score:         1.520739
-Std Deviation:      3.083910
+Mean Score:         3.328644
+Std Deviation:      5.017769
 
 Interpretation:
 --------------------------------------------------------------------------------
@@ -27,6 +27,6 @@ integers in the range [0, 25] for each translation quality score.
 Any trained model should achieve MSE significantly lower than this
 baseline to demonstrate meaningful learning from the data.
 
-Target MSE: < 93.322917 (50% of baseline)
-Good MSE:   < 46.661458 (25% of baseline)
-Excellent:  < 18.664583  (10% of baseline)
+Target MSE: < 82.764030 (50% of baseline)
+Good MSE:   < 41.382015 (25% of baseline)
+Excellent:  < 16.552806  (10% of baseline)

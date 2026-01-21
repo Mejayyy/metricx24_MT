@@ -1,0 +1,14 @@
+{
+  "eval_loss": 11.98454761505127,
+  "eval_mse": 11.98454761505127,
+  "eval_rmse": 3.4618705370148186,
+  "eval_pearson": 0.7449136296178447,
+  "eval_kendall_tau": 0.6899550476682823,
+  "eval_pairwise_acc": 0.6821723062676311,
+  "eval_runtime": 9.9228,
+  "eval_samples_per_second": 188.555,
+  "eval_steps_per_second": 3.023,
+  "epoch": 6.072106261859583,
+  "train_time": 2054.2381,
+  "trainable_params": 582401280
+}
