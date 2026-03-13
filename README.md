@@ -22,23 +22,23 @@ This project was developed at the University of Bucharest, Faculty of Mathematic
 
 ## 🛠️ Tech Stack
 
-* 
+
 **Python 3.10**: The primary programming language.
 
 
-* 
+
 **PyTorch**: The underlying deep learning framework used for model construction and tensor operations.
 
 
-* 
+
 **Hugging Face Transformers**: Used to load pre-trained mT5 models and manage the training loop via the Trainer API.
 
 
-* 
+
 **Scikit-learn & SciPy**: Used for calculating evaluation metrics (like Pearson correlation) and data splitting.
 
 
-* 
+ 
 **Pandas**: Utilized for efficient data preprocessing and handling JSONL dataset files.
 
 
@@ -120,15 +120,15 @@ To ensure stable and efficient training on a single RTX 5090, we implemented sev
 
 Our evaluations focused on Mean Squared Error (MSE), Pearson's r (correlation), and Pairwise Accuracy (ranking).
 
-Model	Architecture	MSE	Pearson	Pairwise Acc	Train time
-(s)
-mT5-small	Enc-Dec	12.12	0.739	0.681	847
-mT5-small	Enc-only	12.22	0.735	0.683	591
-mT5-small	Enc-sigmoid	13.34	0.724	0.732	414
-mT5-base	Enc-Dec	11.98	0.745	0.682	2054
-mT5-base	Enc-only	11.70	0.757	0.686	1515
-mT5-base	Enc-sigmoid	11.60	0.753	0.697	751
-Random chance	-	165.52	-	-	-
+### Table 1: Effect of Architectural Choices on Trainable Parameters
+
+| Pretrained Model | Architecture | Decoder | Parameters |
+|---|---|---|---|
+| mT5-small | Enc-Dec | yes | 300,176,768 |
+| mT5-small | Enc-only + sigmoid | no | 146,941,121 |
+| mT5-base | Enc-Dec | yes | 582,401,280 |
+| mT5-base | Enc-only + sigmoid | no | 277,041,025 |
+
 
 
 **Performance Summary:**
@@ -141,10 +141,16 @@ Random chance	-	165.52	-	-	-
 
 * The **Encoder-Only with a Sigmoid head** represents the most favorable trade-off, combining strong ranking performance, near-optimal correlation, and substantially reduced computational cost.
 
+### Table 2: Performance and Training Cost Across Architectural Variants
+
+| Model | Architecture | MSE | Pearson | Pairwise Acc | Train time (s) |
+|---|---|---|---|---|---|
+| mT5-small | Enc-Dec | 12.12 | 0.739 | 0.681 | 847 |
+| mT5-small | Enc-only | 12.22 | 0.735 | 0.683 | 591 |
+| mT5-small | Enc-sigmoid | 13.34 | 0.724 | 0.732 | 414 |
+| mT5-base | Enc-Dec | 11.98 | 0.745 | 0.682 | 2054 |
+| mT5-base | Enc-only | 11.70 | 0.757 | 0.686 | 1515 |
+| mT5-base | Enc-sigmoid | 11.60 | 0.753 | 0.697 | 751 |
+| Random chance | - |
 
 
-Pretrained Model	Architecture	Decoder	Parameters
-mT5-small	Enc-Dec	yes	300,176,768
-mT5-small	Enc-only + sigmoid	no	146,941,121
-mT5-base	Enc-Dec	yes	582,401,280
-mT5-base	Enc-only + sigmoid	no	277,041,025
